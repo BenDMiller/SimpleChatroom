@@ -1,111 +1,140 @@
-# Python program to implement server side of chat room. 
-import socket 
-import select 
-import sys 
-'''Replace "thread" with "_thread" for python 3'''
-from thread import *
+import socket
+import select
 
-"""The first argument AF_INET is the address domain of the 
-socket. This is used when we have an Internet Domain with 
-any two hosts The second argument is the type of socket. 
-SOCK_STREAM means that data or characters are read in 
-a continuous flow."""
-server = socket.socket(socket.AF_INET, socket.SOCK_STREAM) 
-server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) 
+HEADER_LENGTH = 10
 
-# checks whether sufficient arguments have been provided 
-if len(sys.argv) != 3: 
-	print ("Correct usage: script, IP address, port number")
-	exit() 
+IP = "127.0.0.1"
+PORT = 1234
 
-# takes the first argument from command prompt as IP address 
-IP_address = str(sys.argv[1]) 
+# Create a socket
+# socket.AF_INET - address family, IPv4, some otehr possible are AF_INET6, AF_BLUETOOTH, AF_UNIX
+# socket.SOCK_STREAM - TCP, conection-based, socket.SOCK_DGRAM - UDP, connectionless, datagrams, socket.SOCK_RAW - raw IP packets
+server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-# takes second argument from command prompt as port number 
-Port = int(sys.argv[2]) 
+# SO_ - socket option
+# SOL_ - socket option level
+# Sets REUSEADDR (as a socket option) to 1 on socket
+server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-""" 
-binds the server to an entered IP address and at the 
-specified port number. 
-The client must be aware of these parameters 
-"""
-server.bind((IP_address, Port)) 
+# Bind, so server informs operating system that it's going to use given IP and port
+# For a server using 0.0.0.0 means to listen on all available interfaces, useful to connect locally to 127.0.0.1 and remotely to LAN interface IP
+server_socket.bind((IP, PORT))
 
-""" 
-listens for 100 active connections. This number can be 
-increased as per convenience. 
-"""
-server.listen(100) 
+# This makes server listen to new connections
+server_socket.listen()
 
-list_of_clients = [] 
+# List of sockets for select.select()
+sockets_list = [server_socket]
 
-def clientthread(conn, addr): 
+# List of connected clients - socket as a key, user header and name as data
+clients = {}
 
-	# sends a message to the client whose user object is conn 
-	conn.send("Welcome to this chatroom!") 
+print(f'Listening for connections on {IP}:{PORT}...')
 
-	while True: 
-			try: 
-				message = conn.recv(2048) 
-				if message: 
+# Handles message receiving
+def receive_message(client_socket):
 
-					"""prints the message and address of the 
-					user who just sent the message on the server 
-					terminal"""
-					print ("<" + addr[0] + "> " + message) 
+    try:
 
-					# Calls broadcast function to send message to all 
-					message_to_send = "<" + addr[0] + "> " + message 
-					broadcast(message_to_send, conn) 
+        # Receive our "header" containing message length, it's size is defined and constant
+        message_header = client_socket.recv(HEADER_LENGTH)
 
-				else: 
-					"""message may have no content if the connection 
-					is broken, in this case we remove the connection"""
-					remove(conn) 
+        # If we received no data, client gracefully closed a connection, for example using socket.close() or socket.shutdown(socket.SHUT_RDWR)
+        if not len(message_header):
+            return False
 
-			except: 
-				continue
+        # Convert header to int value
+        message_length = int(message_header.decode('utf-8').strip())
 
-"""Using the below function, we broadcast the message to all 
-clients who's object is not the same as the one sending 
-the message """
-def broadcast(message, connection): 
-	for clients in list_of_clients: 
-		if clients!=connection: 
-			try: 
-				clients.send(message) 
-			except: 
-				clients.close() 
+        # Return an object of message header and message data
+        return {'header': message_header, 'data': client_socket.recv(message_length)}
 
-				# if the link is broken, we remove the client 
-				remove(clients) 
+    except:
 
-"""The following function simply removes the object 
-from the list that was created at the beginning of 
-the program"""
-def remove(connection): 
-	if connection in list_of_clients: 
-		list_of_clients.remove(connection) 
+        # If we are here, client closed connection violently, for example by pressing ctrl+c on his script
+        # or just lost his connection
+        # socket.close() also invokes socket.shutdown(socket.SHUT_RDWR) what sends information about closing the socket (shutdown read/write)
+        # and that's also a cause when we receive an empty message
+        return False
 
-while True: 
+while True:
 
-	"""Accepts a connection request and stores two parameters, 
-	conn which is a socket object for that user, and addr 
-	which contains the IP address of the client that just 
-	connected"""
-	conn, addr = server.accept() 
+    # Calls Unix select() system call or Windows select() WinSock call with three parameters:
+    #   - rlist - sockets to be monitored for incoming data
+    #   - wlist - sockets for data to be send to (checks if for example buffers are not full and socket is ready to send some data)
+    #   - xlist - sockets to be monitored for exceptions (we want to monitor all sockets for errors, so we can use rlist)
+    # Returns lists:
+    #   - reading - sockets we received some data on (that way we don't have to check sockets manually)
+    #   - writing - sockets ready for data to be send thru them
+    #   - errors  - sockets with some exceptions
+    # This is a blocking call, code execution will "wait" here and "get" notified in case any action should be taken
+    read_sockets, _, exception_sockets = select.select(sockets_list, [], sockets_list)
 
-	"""Maintains a list of clients for ease of broadcasting 
-	a message to all available people in the chatroom"""
-	list_of_clients.append(conn) 
 
-	# prints the address of the user that just connected 
-	print (addr[0] + " connected")
+    # Iterate over notified sockets
+    for notified_socket in read_sockets:
 
-	# creates and individual thread for every user 
-	# that connects 
-	Thread(target=clientthread, args=(conn,addr,)).start()
-	#start_new_thread(clientthread,(conn,addr))	 
+        # If notified socket is a server socket - new connection, accept it
+        if notified_socket == server_socket:
 
-conn.close() 
-server.close() 
+            # Accept new connection
+            # That gives us new socket - client socket, connected to this given client only, it's unique for that client
+            # The other returned object is ip/port set
+            client_socket, client_address = server_socket.accept()
+
+            # Client should send his name right away, receive it
+            user = receive_message(client_socket)
+
+            # If False - client disconnected before he sent his name
+            if user is False:
+                continue
+
+            # Add accepted socket to select.select() list
+            sockets_list.append(client_socket)
+
+            # Also save username and username header
+            clients[client_socket] = user
+
+            print('Accepted new connection from {}:{}, username: {}'.format(*client_address, user['data'].decode('utf-8')))
+
+        # Else existing socket is sending a message
+        else:
+
+            # Receive message
+            message = receive_message(notified_socket)
+
+            # If False, client disconnected, cleanup
+            if message is False:
+                print('Closed connection from: {}'.format(clients[notified_socket]['data'].decode('utf-8')))
+
+                # Remove from list for socket.socket()
+                sockets_list.remove(notified_socket)
+
+                # Remove from our list of users
+                del clients[notified_socket]
+
+                continue
+
+            # Get user by notified socket, so we will know who sent the message
+            user = clients[notified_socket]
+
+            print(f'Received message from {user["data"].decode("utf-8")}: {message["data"].decode("utf-8")}')
+
+            # Iterate over connected clients and broadcast message
+            for client_socket in clients:
+
+                # But don't sent it to sender
+                if client_socket != notified_socket:
+
+                    # Send user and message (both with their headers)
+                    # We are reusing here message header sent by sender, and saved username header send by user when he connected
+                    client_socket.send(user['header'] + user['data'] + message['header'] + message['data'])
+
+    # It's not really necessary to have this, but will handle some socket exceptions just in case
+    for notified_socket in exception_sockets:
+
+        # Remove from list for socket.socket()
+        sockets_list.remove(notified_socket)
+
+        # Remove from our list of users
+        del clients[notified_socket]
